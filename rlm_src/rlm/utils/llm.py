@@ -10,13 +10,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class OpenAIClient:
-    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-5"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-5", base_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
             raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
         
         self.model = model
-        self.client = OpenAI(api_key=self.api_key)
+        client_kwargs = {"api_key": self.api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
 
         # Implement cost tracking logic here.
     

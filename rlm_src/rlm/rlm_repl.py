@@ -26,11 +26,13 @@ class RLM_REPL(RLM):
                  max_iterations: int = 20,
                  depth: int = 0,
                  enable_logging: bool = False,
+                 base_url: Optional[str] = None,
                  ):
         self.api_key = api_key
         self.model = model
         self.recursive_model = recursive_model
-        self.llm = OpenAIClient(api_key, model) # Replace with other client
+        self.base_url = base_url
+        self.llm = OpenAIClient(api_key, model, base_url=base_url) # Replace with other client
         
         # Track recursive call depth to prevent infinite loops
         self.repl_env = None

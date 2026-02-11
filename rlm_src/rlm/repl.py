@@ -15,7 +15,7 @@ from rlm import RLM
 class Sub_RLM(RLM):
     """Recursive LLM client for REPL environment with fixed configuration."""
     
-    def __init__(self, model: str = "gpt-5"):
+    def __init__(self, model: str = "gpt-5", base_url: str = None):
         # Configuration - model can be specified
         self.api_key = os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -25,7 +25,7 @@ class Sub_RLM(RLM):
 
         # Initialize OpenAI client
         from rlm.utils.llm import OpenAIClient
-        self.client = OpenAIClient(api_key=self.api_key, model=model)
+        self.client = OpenAIClient(api_key=self.api_key, model=model, base_url=base_url)
         
     
     def completion(self, prompt) -> str:
@@ -84,7 +84,7 @@ class REPLEnv:
 
 
         # Initialize minimal RLM / LM client. Change this to support more depths.
-        self.sub_rlm: RLM = Sub_RLM(model=recursive_model)
+        self.sub_rlm: RLM = Sub_RLM(model=recursive_model, base_url=os.getenv("OPENAI_BASE_URL"))
         
         # Create safe globals with only string-safe built-ins
         self.globals = {

@@ -466,13 +466,27 @@ class ARLMDebate:
 
     def _run_rlm(self, question: str) -> dict:
         """
-        Use the actual RLM REPL to manage debate context.
+        Use a single persistent RLM REPL to manage the entire debate.
 
-        The full debate transcript is stored as a string variable in the
-        REPL.  Each agent's turn is produced by RLM_REPL.completion()
-        which can programmatically access and chunk the transcript.
+        Architecture:
+        - ONE ``REPLEnv`` is created at the start and persists across all
+          rounds and all agent turns.
+        - The debate transcript lives as a growing ``debate_transcript``
+          variable inside the REPL.  Agents can programmatically read,
+          grep, slice, and query it via generated Python code.
+        - Each agent turn reuses the same REPL but gets a fresh LLM
+          message history (so the model doesn't confuse its own prior
+          turn with another agent's).  The REPL state (variables,
+          transcript) carries forward.
+        - After each agent responds, we append its response to the
+          transcript variable *inside* the REPL via ``code_execution()``,
+          so the next agent sees it immediately.
+
+        This mirrors the original RLM design (one persistent REPL per
+        completion) but extends it to multi-agent debate: the REPL is
+        the shared workspace, agents are successive callers into it.
         """
-        # Import RLM from the vendored source
+        # Import RLM components from the vendored source
         rlm_src_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "rlm_src",
@@ -480,60 +494,130 @@ class ARLMDebate:
         if rlm_src_path not in sys.path:
             sys.path.insert(0, rlm_src_path)
 
-        from rlm.rlm_repl import RLM_REPL  # noqa: E402
+        from rlm.repl import REPLEnv  # noqa: E402
+        from rlm.utils.llm import OpenAIClient  # noqa: E402
+        from rlm.utils.prompts import next_action_prompt, build_system_prompt  # noqa: E402
+        import rlm.utils.utils as rlm_utils  # noqa: E402
 
         t0 = time.time()
-        total_tokens = 0  # RLM doesn't expose token counts easily; estimate
+        total_tokens = 0
         all_rounds: List[List[str]] = []
-        debate_transcript = ""
+
+        # --- Create ONE persistent REPL for the entire debate ---
+        repl = REPLEnv(
+            context_json=None,
+            context_str=f"Math problem: {question}",
+            recursive_model=self.model,
+        )
+
+        # Initialize the debate transcript as a REPL variable
+        repl.code_execution('debate_transcript = context')  # starts with just the problem
+        repl.code_execution('debate_round = 0')
+        repl.code_execution(f'n_agents = {self.n_agents}')
+        repl.code_execution(f'original_question = """{question}"""')
+
+        # Create the LLM client (shared across agent turns)
+        llm = OpenAIClient(
+            api_key=self.api_key,
+            model=self.model,
+            base_url=self.base_url,
+        )
+
+        max_iterations_per_turn = 10
 
         for rnd in range(self.n_rounds):
             round_responses: List[str] = []
 
+            # Update round counter in REPL
+            repl.code_execution(f'debate_round = {rnd + 1}')
+
             for i in range(self.n_agents):
-                if rnd == 0:
-                    query = (
-                        f"Can you solve the following math problem? {question} "
-                        "Explain your reasoning. Your final answer should be a "
-                        "single numerical number, in the form \\boxed{{answer}}, "
-                        "at the end of your response."
+                # --- Fresh message history per agent turn ---
+                # The REPL state persists, but each agent starts a new
+                # conversation with the LLM so it reasons from scratch.
+                messages = build_system_prompt()
+
+                # Customize the system context for debate
+                debate_context_msg = {
+                    "role": "user",
+                    "content": (
+                        "You are participating in a multi-agent math debate.\n\n"
+                        "The REPL environment contains:\n"
+                        "- `original_question`: the math problem to solve\n"
+                        "- `debate_transcript`: the full history of all agents' "
+                        "responses across all rounds so far\n"
+                        "- `debate_round`: the current round number "
+                        f"({rnd + 1} of {self.n_rounds})\n"
+                        f"- `n_agents`: the number of agents ({self.n_agents})\n"
+                        f"\nYou are Agent {i + 1} of {self.n_agents} in "
+                        f"Round {rnd + 1} of {self.n_rounds}.\n\n"
+                        + (
+                            "This is Round 1 — no prior debate history exists. "
+                            "Read the original question from the REPL and solve it. "
+                            if rnd == 0 else
+                            "Read the debate_transcript from the REPL to see what "
+                            "other agents have proposed. Consider their reasoning, "
+                            "identify errors, and refine your answer. "
+                        )
+                        + "\nYour final answer MUST be a single numerical number "
+                        "in the form \\boxed{answer}."
+                    ),
+                }
+                messages.append(debate_context_msg)
+
+                # --- Iterative REPL interaction (same as standard RLM) ---
+                response_text = None
+                for iteration in range(max_iterations_per_turn):
+                    query_str = (
+                        f"Solve the math problem as Agent {i+1}. "
+                        "Use the REPL to read the question and any prior debate history."
                     )
-                    context = f"Math problem: {question}"
-                else:
-                    query = (
-                        "You are Agent {} in a multi-agent debate. "
-                        "Read through the debate transcript in the context, "
-                        "consider the other agents' solutions, and provide "
-                        "your refined answer to the original math problem. "
-                        "Your final answer should be a single numerical "
-                        "number, in the form \\boxed{{answer}}, at the end "
-                        "of your response."
-                    ).format(i + 1)
-                    context = debate_transcript
+                    prompt = next_action_prompt(query_str, iteration)
+                    full_response = llm.completion(messages + [prompt])
 
-                # Each agent gets a fresh RLM instance
-                rlm = RLM_REPL(
-                    api_key=self.api_key,
-                    model=self.model,
-                    recursive_model=self.model,
-                    max_iterations=10,
-                    enable_logging=False,
+                    # Check for code blocks to execute in the REPL
+                    code_blocks = rlm_utils.find_code_blocks(full_response)
+
+                    if code_blocks is not None:
+                        messages = rlm_utils.process_code_execution(
+                            full_response, messages, repl,
+                            None, None,  # loggers (disabled)
+                        )
+                    else:
+                        messages.append({
+                            "role": "assistant",
+                            "content": "You responded with:\n" + full_response,
+                        })
+
+                    # Check for final answer
+                    final_answer = rlm_utils.check_for_final_answer(
+                        full_response, repl, None,
+                    )
+                    if final_answer:
+                        response_text = final_answer
+                        break
+
+                # If no final answer after max iterations, force one
+                if response_text is None:
+                    messages.append(next_action_prompt("", 0, final_answer=True))
+                    response_text = llm.completion(messages)
+
+                round_responses.append(response_text)
+
+                # --- Append this agent's response to the REPL transcript ---
+                # Escape the response for safe Python string insertion
+                escaped = response_text.replace('\\', '\\\\').replace('"""', '\\"\\"\\"')
+                repl.code_execution(
+                    f'debate_transcript += "\\n\\n--- Round {rnd+1}, Agent {i+1} ---\\n" '
+                    f'+ """{escaped}"""'
                 )
-
-                try:
-                    response = rlm.completion(context, query=query)
-                except Exception as e:
-                    print(f"  [RLM error] Agent {i+1}, Round {rnd+1}: {e}")
-                    response = f"Error: {e}"
-
-                round_responses.append(response)
 
             all_rounds.append(round_responses)
 
-            # Update transcript with this round's responses
-            debate_transcript += f"\n\n=== Round {rnd + 1} ===\n"
-            for a_idx, resp in enumerate(round_responses):
-                debate_transcript += f"\n--- Agent {a_idx + 1} ---\n{resp}\n"
+            # Add round separator to transcript
+            repl.code_execution(
+                f'debate_transcript += "\\n\\n=== End of Round {rnd+1} ===\\n"'
+            )
 
         wall_time = time.time() - t0
 
