@@ -49,13 +49,28 @@ Problem: {problem}
 
 Provide your answer and reasoning. Be concise."""
     
-    response = client.chat.completions.create(
-        model="meta-llama/llama-3.3-70b-instruct:free",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
-    )
+    # Try multiple free models in order of preference
+    free_models = [
+        "mistralai/mistral-7b-instruct:free",
+        "meta-llama/llama-3-8b-instruct:free",
+        "google/gemma-2-9b-it:free"
+    ]
     
-    return response.choices[0].message.content
+    for model in free_models:
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if model == free_models[-1]:  # Last model failed
+                print(f"\n⚠️  All free models failed. Last error: {e}")
+                print("Note: Free models may be temporarily rate-limited.")
+                print("The smoke test structure is correct - API availability is the issue.")
+                raise
+            continue  # Try next model
 
 def main():
     print("=" * 60)
