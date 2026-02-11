@@ -21,8 +21,8 @@ def find_code_blocks(text: str) -> List[str]:
 
 def find_final_answer(text: str) -> Optional[Tuple[str, str]]:
     """
-    Find FINAL(...) or FINAL_VAR(...) statement in response and return (type, content).
-    Returns None if neither pattern is found.
+    Find FINAL(...), FINAL_VAR(...), or \\boxed{} in response and return (type, content).
+    Returns None if no pattern is found.
     """
     # Check for FINAL_VAR pattern first - must be at start of line
     final_var_pattern = r'^\s*FINAL_VAR\((.*?)\)'
@@ -33,6 +33,12 @@ def find_final_answer(text: str) -> Optional[Tuple[str, str]]:
     # Check for FINAL pattern - must be at start of line
     final_pattern = r'^\s*FINAL\((.*?)\)'
     match = re.search(final_pattern, text, re.MULTILINE | re.DOTALL)
+    if match:
+        return ('FINAL', match.group(1).strip())
+    
+    # Also accept LaTeX \boxed{} format (common in math responses)
+    boxed_pattern = r'\\boxed\{([^}]+)\}'
+    match = re.search(boxed_pattern, text)
     if match:
         return ('FINAL', match.group(1).strip())
     
@@ -132,11 +138,13 @@ def execute_code(repl_env, code: str, repl_env_logger, logger) -> str:
         formatted_result = format_execution_result(
             result.stdout, result.stderr, result.locals
         )
-        repl_env_logger.log_execution(code, result.stdout, result.stderr, result.execution_time)
-        repl_env_logger.display_last()
+        if repl_env_logger is not None:
+            repl_env_logger.log_execution(code, result.stdout, result.stderr, result.execution_time)
+            repl_env_logger.display_last()
 
         # Print out tool execution to root
-        logger.log_tool_execution("CODE_EXECUTION", formatted_result)
+        if logger is not None:
+            logger.log_tool_execution("CODE_EXECUTION", formatted_result)
         
         return formatted_result
         
@@ -202,12 +210,14 @@ def check_for_final_answer(response: str, repl_env, logger) -> Optional[str]:
                 return str(variable_value)
             else:
                 error_msg = f"Variable '{variable_name}' not found in REPL environment"
-                logger.log_tool_execution("FINAL_VAR", error_msg)
+                if logger is not None:
+                    logger.log_tool_execution("FINAL_VAR", error_msg)
                 return None
         except Exception as e:
             error_msg = f"Error retrieving variable '{variable_name}': {str(e)}"
             print('ERROR MESSAGE', error_msg)
-            logger.log_tool_execution("FINAL_VAR", error_msg)
+            if logger is not None:
+                logger.log_tool_execution("FINAL_VAR", error_msg)
             return None
     
     return None
