@@ -315,6 +315,7 @@ class ARLMDebate:
         context_strategy: str = "summary",
         temperature: float = 0.7,
         early_exit: bool = False,
+        max_repl_iterations: int = 10,
     ):
         if context_strategy not in ("full", "summary", "rlm"):
             raise ValueError(f"Unknown context_strategy: {context_strategy!r}")
@@ -328,6 +329,7 @@ class ARLMDebate:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url
 
+        self.max_repl_iterations = max_repl_iterations
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -627,7 +629,7 @@ class ARLMDebate:
             base_url=self.base_url,
         )
 
-        max_iterations_per_turn = 10
+        max_iterations_per_turn = self.max_repl_iterations
 
         for rnd in range(self.n_rounds):
             round_responses: List[str] = []
@@ -703,7 +705,15 @@ class ARLMDebate:
 
                 # If no final answer after max iterations, force one
                 if response_text is None:
-                    messages.append(next_action_prompt("", 0, final_answer=True))
+                    force_prompt = {
+                        "role": "user",
+                        "content": (
+                            "You must now provide your final numerical answer. "
+                            "State your answer as a single number inside \\boxed{}. "
+                            "Example: \\boxed{42}"
+                        ),
+                    }
+                    messages.append(force_prompt)
                     response_text = llm.completion(messages)
 
                 round_responses.append(response_text)
