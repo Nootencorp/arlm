@@ -510,11 +510,20 @@ class ARLMDebate:
             recursive_model=self.model,
         )
 
-        # Initialize the debate transcript as a REPL variable
-        repl.code_execution('debate_transcript = context')  # starts with just the problem
+        # Initialize REPL variables.
+        # `context` is the primary variable the RLM system prompt tells
+        # the model to inspect.  We keep it as the combined view:
+        # original problem + full debate history (updated each turn).
+        # `original_question` is a stable reference that never changes.
+        repl.code_execution(f'original_question = """{question}"""')
+        repl.code_execution('debate_transcript = ""')
         repl.code_execution('debate_round = 0')
         repl.code_execution(f'n_agents = {self.n_agents}')
-        repl.code_execution(f'original_question = """{question}"""')
+        # context = problem + transcript (transcript is empty in round 1)
+        repl.code_execution(
+            'context = "ORIGINAL PROBLEM:\\n" + original_question '
+            '+ "\\n\\nDEBATE HISTORY:\\n" + debate_transcript'
+        )
 
         # Create the LLM client (shared across agent turns)
         llm = OpenAIClient(
@@ -610,6 +619,11 @@ class ARLMDebate:
                 repl.code_execution(
                     f'debate_transcript += "\\n\\n--- Round {rnd+1}, Agent {i+1} ---\\n" '
                     f'+ """{escaped}"""'
+                )
+                # Keep `context` current (what the RLM prompt tells models to read)
+                repl.code_execution(
+                    'context = "ORIGINAL PROBLEM:\\n" + original_question '
+                    '+ "\\n\\nDEBATE HISTORY:\\n" + debate_transcript'
                 )
 
             all_rounds.append(round_responses)
