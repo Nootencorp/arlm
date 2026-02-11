@@ -2,5 +2,7 @@
 *.pyc
 __pycache__/
 results/
-*.jsonl
 .aider*
+
+# Downloaded benchmark data (re-downloadable via benchmarks/download_gsm8k.sh)
+benchmarks/gsm8k/
