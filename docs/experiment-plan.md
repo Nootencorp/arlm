@@ -117,6 +117,25 @@ This is the core experiment. We use RLM to wrap the debate loop, storing all age
 
 - Purpose: Du et al. only tested 3 and 6 agents. With RLM handling context, we can scale agents too.
 
+**Experiment 2D — Convergence Detection with Devil's Advocate**
+
+Run ARLM with `early_exit=True` at high round counts (8, 12, 16):
+- After each round (from round 2+), check if all agents agree
+- If unanimous: run a devil's advocate challenge round ("find flaws in this consensus")
+- If consensus survives the challenge: exit early — answer is verified
+- If consensus breaks: resume normal debate
+
+| Config | Agents | Max Rounds | Early Exit |
+|--------|--------|-----------|------------|
+| arlm-8r-noexit | 3 | 8 | No |
+| arlm-8r-exit | 3 | 8 | Yes |
+| arlm-12r-exit | 3 | 12 | Yes |
+| arlm-16r-exit | 3 | 16 | Yes |
+
+- Purpose: Test whether adversarial convergence detection can push accuracy higher while using fewer rounds on average than the fixed-round approach.
+- Key metrics: accuracy, average rounds used, cost per problem
+- Hypothesis: Early exit + devil's advocate achieves similar or better accuracy as fixed high-round counts, at significantly lower cost (easy problems exit early, hard problems get full rounds).
+
 ### Phase 3: Ablations (Days 7-8)
 
 **Experiment 3A — Component Isolation**

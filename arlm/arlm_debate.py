@@ -289,6 +289,20 @@ class ARLMDebate:
     ``"rlm"``    Full RLM REPL: the entire debate transcript is stored as a
                   context string in the REPL and each agent's response is
                   produced via ``RLM_REPL.completion()``.
+
+    Convergence
+    -----------
+    When ``early_exit=True``, after each round (starting from round 2) we
+    check if all agents agree on the same numerical answer.  If so:
+
+    1. A **devil's advocate round** fires: each agent is prompted to find
+       flaws in the consensus and challenge the shared answer.
+    2. After the challenge, if all agents *still* agree on the same answer,
+       the debate exits early — the answer survived adversarial scrutiny.
+    3. If any agent breaks consensus, normal debate resumes.
+
+    This saves compute on easy problems (early exit) while spending rounds
+    on hard ones (where consensus breaks under challenge).
     """
 
     def __init__(
@@ -300,6 +314,7 @@ class ARLMDebate:
         base_url: Optional[str] = None,
         context_strategy: str = "summary",
         temperature: float = 0.7,
+        early_exit: bool = False,
     ):
         if context_strategy not in ("full", "summary", "rlm"):
             raise ValueError(f"Unknown context_strategy: {context_strategy!r}")
@@ -309,12 +324,53 @@ class ARLMDebate:
         self.n_rounds = n_rounds
         self.context_strategy = context_strategy
         self.temperature = temperature
+        self.early_exit = early_exit
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url
 
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
+        )
+
+    # -- convergence detection with devil's advocate -------------------------
+
+    @staticmethod
+    def _check_consensus(responses: List[str]) -> Optional[str]:
+        """
+        Check if all agents agree on the same numerical answer.
+
+        Returns the consensus answer string if unanimous, else ``None``.
+        """
+        answers = [extract_answer(r) for r in responses]
+        # Filter out extraction failures
+        valid = [a for a in answers if a is not None]
+        if not valid:
+            return None
+        # Check if all valid answers match (float-tolerant)
+        first = valid[0]
+        if all(answers_match(a, first) for a in valid[1:]):
+            return first
+        return None
+
+    @staticmethod
+    def _devils_advocate_prompt(consensus_answer: str, question: str) -> str:
+        """
+        Prompt that challenges agents to find flaws in a consensus.
+        """
+        return (
+            f"DEVIL'S ADVOCATE CHALLENGE: All agents currently agree that "
+            f"the answer is {consensus_answer}. Your task is to critically "
+            f"examine this consensus. Actively look for:\n"
+            f"- Arithmetic errors in the reasoning\n"
+            f"- Misinterpretations of the problem\n"
+            f"- Overlooked conditions or edge cases\n"
+            f"- Assumptions that may be wrong\n\n"
+            f"The original problem is: {question}\n\n"
+            f"If you find a genuine error, provide the corrected answer. "
+            f"If the consensus is truly correct after careful scrutiny, "
+            f"confirm it with your reasoning. Your final answer should be "
+            f"a single numerical number, in the form \\boxed{{answer}}."
         )
 
     # -- strategy: full (delegate to StandardDebate) ------------------------
@@ -451,6 +507,43 @@ class ARLMDebate:
                 summaries.append(summary)
             round_summaries.append(summaries)
 
+            # -- Convergence detection with devil's advocate ----------------
+            if self.early_exit and rnd >= 1:
+                consensus = self._check_consensus(round_responses)
+                if consensus is not None:
+                    # All agents agree — run devil's advocate challenge
+                    da_prompt = self._devils_advocate_prompt(consensus, question)
+                    da_responses: List[str] = []
+                    for i in range(self.n_agents):
+                        messages = [{"role": "user", "content": da_prompt}]
+                        result = _call_llm(
+                            self.client, self.model, messages,
+                            temperature=self.temperature,
+                        )
+                        total_tokens += result["prompt_tokens"] + result["completion_tokens"]
+                        da_responses.append(result["content"])
+
+                    # Check if consensus holds after challenge
+                    post_challenge = self._check_consensus(da_responses)
+                    if post_challenge is not None:
+                        # Consensus survived scrutiny — exit early
+                        all_rounds.append(da_responses)
+                        break
+                    else:
+                        # Consensus broken — record the challenge round
+                        # and continue normal debate
+                        all_rounds.append(da_responses)
+                        # Summarize the challenge round for context
+                        da_summaries = []
+                        for a_idx, resp in enumerate(da_responses):
+                            try:
+                                s = self._summarize_response(a_idx, resp)
+                                total_tokens += 100
+                            except Exception:
+                                s = resp[:200] + "..."
+                            da_summaries.append(s)
+                        round_summaries.append(da_summaries)
+
         wall_time = time.time() - t0
 
         return {
@@ -460,6 +553,8 @@ class ARLMDebate:
             "token_count": total_tokens,
             "wall_time": wall_time,
             "context_strategy": "summary",
+            "early_exit": len(all_rounds) < self.n_rounds,
+            "rounds_used": len(all_rounds),
         }
 
     # -- strategy: rlm (full REPL) -----------------------------------------
@@ -633,6 +728,72 @@ class ARLMDebate:
                 f'debate_transcript += "\\n\\n=== End of Round {rnd+1} ===\\n"'
             )
 
+            # -- Convergence detection with devil's advocate ----------------
+            if self.early_exit and rnd >= 1:
+                consensus = self._check_consensus(round_responses)
+                if consensus is not None:
+                    # Inject devil's advocate challenge into REPL
+                    da_prompt = self._devils_advocate_prompt(consensus, question)
+                    repl.code_execution(
+                        f'debate_transcript += "\\n\\n=== DEVILS ADVOCATE CHALLENGE ==='
+                        f'\\nAll agents agreed on {consensus}. Challenge round:\\n"'
+                    )
+
+                    da_responses: List[str] = []
+                    for i in range(self.n_agents):
+                        da_messages = build_system_prompt()
+                        da_messages.append({
+                            "role": "user",
+                            "content": da_prompt + (
+                                "\n\nUse the REPL environment to review "
+                                "the debate_transcript and verify the reasoning."
+                            ),
+                        })
+                        da_query = f"Challenge the consensus answer of {consensus}."
+                        da_response = None
+
+                        for iteration in range(max_iterations_per_turn):
+                            prompt = next_action_prompt(da_query, iteration)
+                            full_response = llm.completion(da_messages + [prompt])
+                            code_blocks = rlm_utils.find_code_blocks(full_response)
+                            if code_blocks is not None:
+                                da_messages = rlm_utils.process_code_execution(
+                                    full_response, da_messages, repl, None, None,
+                                )
+                            else:
+                                da_messages.append({
+                                    "role": "assistant",
+                                    "content": "You responded with:\n" + full_response,
+                                })
+                            final_answer = rlm_utils.check_for_final_answer(
+                                full_response, repl, None,
+                            )
+                            if final_answer:
+                                da_response = final_answer
+                                break
+
+                        if da_response is None:
+                            da_messages.append(next_action_prompt("", 0, final_answer=True))
+                            da_response = llm.completion(da_messages)
+
+                        da_responses.append(da_response)
+
+                        escaped = da_response.replace('\\', '\\\\').replace('"""', '\\"\\"\\"')
+                        repl.code_execution(
+                            f'debate_transcript += "\\n--- Challenge, Agent {i+1} ---\\n"'
+                            f' + """{escaped}"""'
+                        )
+                        repl.code_execution(
+                            'context = "ORIGINAL PROBLEM:\\n" + original_question '
+                            '+ "\\n\\nDEBATE HISTORY:\\n" + debate_transcript'
+                        )
+
+                    post_challenge = self._check_consensus(da_responses)
+                    all_rounds.append(da_responses)
+                    if post_challenge is not None:
+                        # Consensus survived — exit early
+                        break
+
         wall_time = time.time() - t0
 
         return {
@@ -641,6 +802,8 @@ class ARLMDebate:
             "token_count": total_tokens,
             "wall_time": wall_time,
             "context_strategy": "rlm",
+            "early_exit": len(all_rounds) < self.n_rounds,
+            "rounds_used": len(all_rounds),
         }
 
     # -- public interface ---------------------------------------------------
