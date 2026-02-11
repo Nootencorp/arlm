@@ -3,3 +3,5 @@ rlms
 python-dotenv
 rich
 numpy
+matplotlib
+scipy
